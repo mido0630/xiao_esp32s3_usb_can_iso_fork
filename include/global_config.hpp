@@ -4,7 +4,7 @@
 #include <Arduino.h>
 
 /************************ PinAssign設定 ここから ************************/
-namespace PIN{
+namespace PIN {
 
 static constexpr uint8_t DEBUG_USER_LED = LED_BUILTIN;
 static constexpr uint8_t DEBUG_UART_TX  = D0;
@@ -19,26 +19,25 @@ static constexpr uint8_t RS485_RE = D8;
 static constexpr uint8_t RS485_RX = D9;
 static constexpr uint8_t RS485_TX = D10;
 
-};
+}; // namespace PIN
 /************************ PinAssign設定 ここまで ************************/
 
-
 /************************ RTOS設定 ここから ************************/
-#define CAN_STACK_SIZE    (4096)
-#define RS485_STACK_SIZE  (4096)
-#define UI_STACK_SIZE     (4096)
-#define DEBUG_STACK_SIZE  (4096)
+#define CAN_STACK_SIZE (4096)
+#define RS485_STACK_SIZE (4096)
+#define UI_STACK_SIZE (4096)
+#define DEBUG_STACK_SIZE (4096)
 
-static constexpr uint32_t  LOOP_RATE_CAN_HZ   = 1000;
-static constexpr uint32_t  LOOP_RATE_RS485_HZ = 200;
-static constexpr uint32_t  LOOP_RATE_UI_HZ    = 100;
-static constexpr uint32_t  LOOP_RATE_DEBUG_HZ = 100;
+static constexpr uint32_t LOOP_RATE_CAN_HZ   = 1000;
+static constexpr uint32_t LOOP_RATE_RS485_HZ = 200;
+static constexpr uint32_t LOOP_RATE_UI_HZ    = 100;
+static constexpr uint32_t LOOP_RATE_DEBUG_HZ = 100;
 
 /************************ RTOS設定 ここまで ************************/
 
 /************************ DEBUG PRINT設定 ここから ************************/
 #define DEBUG_SERIAL_MOD (Serial)
-//#define DEBUG_SERIAL_MOD (Serial1)
+// #define DEBUG_SERIAL_MOD (Serial1)
 
 #include "Debug_task_main.hpp"
 template <typename... Args>
@@ -48,10 +47,10 @@ void debug_printf(const char *format, Args const &...args) {
   DEBUG::print(DEBUG::EXT_PRINT_BUF, u16_print_size);
 }
 
-//#define DEBUG_PRINT_CAN(fmt, ...) debug_printf(fmt, __VA_ARGS__)
+// #define DEBUG_PRINT_CAN(fmt, ...) debug_printf(fmt, __VA_ARGS__)
 #define DEBUG_PRINT_CAN(fmt, ...)
 
-//#define DEBUG_PRINT_STR_CAN(fmt) debug_printf(fmt)
+// #define DEBUG_PRINT_STR_CAN(fmt) debug_printf(fmt)
 #define DEBUG_PRINT_STR_CAN(fmt)
 
 /************************ DEBUG PRINT設定 ここまで ************************/
@@ -67,7 +66,7 @@ enum DBG_PRC_ID {
 };
 
 #if ENABLE_PRINT_PROCESS_LOAD
-#define DEBUG_PRINT_PRC_START(proc_id)  DEBUG::record_proc_load(proc_id, 1)
+#define DEBUG_PRINT_PRC_START(proc_id) DEBUG::record_proc_load(proc_id, 1)
 #define DEBUG_PRINT_PRC_FINISH(proc_id) DEBUG::record_proc_load(proc_id, 0)
 #else
 #define DEBUG_PRINT_PRC_START(proc_id)
