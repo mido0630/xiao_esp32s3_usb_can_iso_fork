@@ -28,7 +28,7 @@ static constexpr uint8_t RS485_TX = D10;
 #define UI_STACK_SIZE (4096)
 #define DEBUG_STACK_SIZE (4096)
 
-static constexpr uint32_t LOOP_RATE_CAN_HZ   = 1000;
+static constexpr uint32_t LOOP_RATE_CAN_HZ   = 100;
 static constexpr uint32_t LOOP_RATE_RS485_HZ = 200;
 static constexpr uint32_t LOOP_RATE_UI_HZ    = 100;
 static constexpr uint32_t LOOP_RATE_DEBUG_HZ = 100;

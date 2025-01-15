@@ -6,6 +6,7 @@
 #include "Debug_task_main.hpp"
 #include "can_task.hpp"
 #include "global_config.hpp"
+#include "joint_data_control.hpp"
 #include "util_gptimer.hpp"
 
 hw_timer_t *debug_gp_timer = NULL;
@@ -16,29 +17,14 @@ TaskHandle_t tskHndl_rs485;
 TaskHandle_t tskHndl_ui;
 TaskHandle_t tskHndl_debug;
 
-twai_message_t tx_message;
-
 void main_can(void *params) {
   uint32_t loop_tick = (int)configTICK_RATE_HZ / LOOP_RATE_CAN_HZ;
 
   auto xLastWakeTime = xTaskGetTickCount();
   while(true) {
     vTaskDelayUntil(&xLastWakeTime, loop_tick);
-    tx_message.extd             = 1;                        // 拡張フレーム
-    uint32_t base_id            = 0x31;                     // 基本となるID
-    uint32_t sub_id             = 0x1234;                   // サブIDとしてのレスポンスID
-    tx_message.identifier       = (base_id << 18) | sub_id; // 拡張ID
-    tx_message.data_length_code = 8;                        // データ長8バイト
-    tx_message.data[0]          = 0x00;                     // 送信データの設定
-    tx_message.data[1]          = 0x01;
-    tx_message.data[2]          = 0x02;
-    tx_message.data[3]          = 0x03;
-    tx_message.data[4]          = 0x04;
-    tx_message.data[5]          = 0x05;
-    tx_message.data[6]          = 0x06;
-    tx_message.data[7]          = 0x07;
     DEBUG_PRINT_PRC_START(DBG_PRC_ID::CAN_MAIN); // 処理時間計測開始
-    can_task_main(tx_message);
+    can_task_main();
     // printCanBusStatus();
     DEBUG_PRINT_PRC_FINISH(DBG_PRC_ID::CAN_MAIN); // 処理時間計測停止
   }
@@ -64,7 +50,7 @@ void main_ui(void *params) {
     vTaskDelayUntil(&xLastWakeTime, loop_tick);
     DEBUG_PRINT_PRC_START(DBG_PRC_ID::UI_MAIN); // 処理時間計測開始
 
-    digitalWrite(PIN::DEBUG_USER_LED, digitalRead(PIN::DEBUG_USER_LED) ^ 1);
+    // digitalWrite(PIN::DEBUG_USER_LED, digitalRead(PIN::DEBUG_USER_LED) ^ 1);
 
     DEBUG_PRINT_PRC_FINISH(DBG_PRC_ID::UI_MAIN); // 処理時間計測停止
   }
@@ -96,6 +82,10 @@ void setup() {
   // 外部デバイスの電源ON
   digitalWrite(PIN::PWR_COM_DEVICE, HIGH);
 
+  // 関節情報の初期化(global)
+  joint_cmd_list   = initialize_joint_cmd_list();
+  joint_state_list = initialize_joint_state_list();
+
   // Task Config
   DEBUG::prepare_task();
 
@@ -106,4 +96,7 @@ void setup() {
 }
 
 void loop() {
+  // print_joint_cmd(joint_cmd_list);
+  print_joint_state(joint_state_list);
+  printCanBusStatus();
 }

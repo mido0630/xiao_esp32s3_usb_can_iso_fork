@@ -1,57 +1,50 @@
+#include "can_task.hpp"
 #include "debug_print.hpp"
 #include "global_config.hpp"
-#include <Arduino.h>
+#include "joint_data_control.hpp"
 #include <ESP32-TWAI-CAN.hpp>
 #define CAN_DEBUG_LEVEL_SETTING DEBUG_WARN // デバッグレベル設定
-
-twai_message_t received_message; // 受信メッセージ
+twai_message_t tx_msg;
+twai_message_t rx_msg;
 
 void printCanBusStatus() {
   twai_status_info_t status;
   esp_err_t          result = twai_get_status_info(&status);
 
   if(result == ESP_OK) {
-    Serial.println("---- CAN Bus Status ----");
-    Serial.print("State: ");
+    Serial.print("[CAN]\t");
+    Serial.print("St: "); // State
     switch(status.state) {
     case TWAI_STATE_STOPPED:
-      Serial.println("Stopped");
+      Serial.print("Stop");
       break;
     case TWAI_STATE_RUNNING:
-      Serial.println("Running");
+      Serial.print("Run");
       break;
     case TWAI_STATE_BUS_OFF:
-      Serial.println("Bus Off");
+      Serial.print("Off");
       break;
     case TWAI_STATE_RECOVERING:
-      Serial.println("Recovering");
+      Serial.print("Rec");
       break;
     default:
-      Serial.println("Unknown");
+      Serial.print("Unk");
       break;
     }
-
-    Serial.print("Messages to TX: ");
-    Serial.println(status.msgs_to_tx);
-
-    Serial.print("Messages to RX: ");
-    Serial.println(status.msgs_to_rx);
-
-    Serial.print("TX Error Counter: ");
-    Serial.println(status.tx_error_counter);
-
-    Serial.print("RX Error Counter: ");
-    Serial.println(status.rx_error_counter);
-
-    Serial.print("TX Failed Count: ");
-    Serial.println(status.tx_failed_count);
-
-    Serial.print("RX Missed Count: ");
+    Serial.print("\tTXQ: "); // Messages to TX
+    Serial.print(status.msgs_to_tx);
+    Serial.print("\tRXQ: "); // Messages to RX
+    Serial.print(status.msgs_to_rx);
+    Serial.print("\tTXE: "); // TX Error Counter
+    Serial.print(status.tx_error_counter);
+    Serial.print("\tRXE: "); // RX Error Counter
+    Serial.print(status.rx_error_counter);
+    Serial.print("\tTXF: "); // TX Failed Count
+    Serial.print(status.tx_failed_count);
+    Serial.print("\tRXM: "); // RX Missed Count
     Serial.println(status.rx_missed_count);
-
-    Serial.println("-------------------------");
   } else {
-    Serial.println("Failed to get CAN bus status.");
+    Serial.println("[CAN]\tStatus Failed");
   }
 }
 
@@ -110,7 +103,7 @@ void handleStopError() {
 }
 
 // エラー時の処理関数
-void handleTransmitError(uint32_t base_id, const twai_message_t &tx_message) {
+void handleTransmitError(uint32_t base_id, const twai_message_t &tx_msg) {
   twai_status_info_t status;
   esp_err_t          result = twai_get_status_info(&status);
 
@@ -177,7 +170,7 @@ void handleTransmitError(uint32_t base_id, const twai_message_t &tx_message) {
   }
 }
 
-void processResSummary2(const twai_message_t &message) {
+void processResSummary(const twai_message_t &message) {
   uint32_t base_id = (message.identifier >> 18) & 0x7FF; // base_id を抽出
   uint32_t cmd_id  = message.identifier & 0x3FFFF;       // CMD ID (sub_id) を抽出
 
@@ -193,31 +186,188 @@ void processResSummary2(const twai_message_t &message) {
 
   debugPrint(DEBUG_DETAIL, "Base ID: 0x%X, Joint Angle: %.2f deg, Motor Current: %.2f A, Motor Voltage: %.2f V, VM Voltage: %.2f V",
              base_id, joint_angle, motor_current, motor_voltage, vm_voltage);
+  // joint_state_list から base_id に対応するエントリを探す
+  for(auto &joint : joint_state_list) {
+    if(joint.joint_id == base_id) {                            // 対応する関節を発見
+      joint.angle         = joint_angle;                       // 関節角度を更新
+      joint.current       = motor_current;                     // モーター電流を更新
+      joint.motor_voltage = motor_voltage;                     // モーター電圧を更新
+      joint.vm_voltage    = static_cast<uint32_t>(vm_voltage); // VM電圧を更新
+      debugPrint(DEBUG_INFO, "Updated joint state for Base ID: 0x%X", base_id);
+      break;
+    }
+  }
 }
 
-void can_task_main(twai_message_t tx_message) {
-  setDebugLevel(CAN_DEBUG_LEVEL_SETTING);
-  // 送信
-  if(twai_transmit(&tx_message, pdMS_TO_TICKS(1)) == ESP_OK) {
-    debugPrint(DEBUG_INFO, "CAN message sent");
-  } else {
-    debugPrint(DEBUG_ERROR, "Failed to send CAN message");
-    uint32_t base_id = (tx_message.identifier >> 18) & 0x7FF;
-    // handleTransmitError(base_id, tx_message);
-    debugPrint(DEBUG_INFO, "Clearing TX queue...");
-    if(twai_clear_transmit_queue() != ESP_OK) {
-      debugPrint(DEBUG_ERROR, "Failed to clear TX queue.");
-      return;
-    }
-    return;
+void make_tx_header(uint8_t joint_id, cmd_id command, cmd_id flag = cmd_id::WITH_RES) {
+  tx_msg.identifier = (static_cast<uint32_t>(joint_id) << 18) |
+                      (static_cast<uint16_t>(command) | static_cast<uint16_t>(flag));
+  tx_msg.extd             = 1;
+  tx_msg.data_length_code = CAN_DATA_LENGTH;
+}
+void make_tx_data_fill_zero() {
+  for(uint8_t i = 0; i < CAN_DATA_LENGTH; ++i) {
+    tx_msg.data[i] = 0x00;
   }
+}
+void make_tx_data_move_angle(float target_angle, uint32_t move_time, float current_limit) {
+  // target_angle s15.16 [deg] LE 形式
+  int32_t angle_s15_16 = static_cast<int32_t>(target_angle * 32768.0f); // 2^15
+  tx_msg.data[0]       = static_cast<uint8_t>(angle_s15_16 & 0xFF);
+  tx_msg.data[1]       = static_cast<uint8_t>((angle_s15_16 >> 8) & 0xFF);
+  tx_msg.data[2]       = static_cast<uint8_t>((angle_s15_16 >> 16) & 0xFF);
+  tx_msg.data[3]       = static_cast<uint8_t>((angle_s15_16 >> 24) & 0xFF);
+  // move_time  [ms] LE 形式
+  tx_msg.data[4] = static_cast<uint8_t>(move_time & 0xFF);
+  tx_msg.data[5] = static_cast<uint8_t>((move_time >> 8) & 0xFF);
+  // current_limit s8.8 [A] LE 形式
+  uint16_t current_s8_8 = static_cast<uint16_t>(current_limit * 256.0f);
+  tx_msg.data[6]        = static_cast<uint8_t>(current_s8_8 & 0xFF);
+  tx_msg.data[7]        = static_cast<uint8_t>((current_s8_8 >> 8) & 0xFF);
+}
 
-  // 受信
-  twai_message_t rx_message;
-  if(twai_receive(&rx_message, pdMS_TO_TICKS(100)) == ESP_OK) {
-    received_message = rx_message;
-    processResSummary2(received_message);
-  } else {
-    debugPrint(DEBUG_WARN, "No CAN message received");
+void make_tx_data_set_target_current(float target_iq, float target_id) {
+  // target_iq s15.16 [A] LE 形式
+  int32_t iq_s15_16 = static_cast<int32_t>(target_iq * 32768.0f);
+  tx_msg.data[0]    = static_cast<uint8_t>(iq_s15_16 & 0xFF);
+  tx_msg.data[1]    = static_cast<uint8_t>((iq_s15_16 >> 8) & 0xFF);
+  tx_msg.data[2]    = static_cast<uint8_t>((iq_s15_16 >> 16) & 0xFF);
+  tx_msg.data[3]    = static_cast<uint8_t>((iq_s15_16 >> 24) & 0xFF);
+  // target_id s15.16 [A] LE 形式
+  int32_t id_s15_16 = static_cast<int32_t>(target_id * 32768.0f);
+  tx_msg.data[4]    = static_cast<uint8_t>(id_s15_16 & 0xFF);
+  tx_msg.data[5]    = static_cast<uint8_t>((id_s15_16 >> 8) & 0xFF);
+  tx_msg.data[6]    = static_cast<uint8_t>((id_s15_16 >> 16) & 0xFF);
+  tx_msg.data[7]    = static_cast<uint8_t>((id_s15_16 >> 24) & 0xFF);
+}
+
+void make_tx_msg(const joint_cmd &joint) {
+  if(joint.torque_on == 0 && joint.motor_enabled == 0) { // torque_onが来ておらず、モータもenableじゃないので何もしない
+    debugPrint(DEBUG_INFO, "Processing joint ID: 0x%X - Case A (Torque Off, Motor Disabled)", joint.joint_id);
+    make_tx_header(joint.joint_id, cmd_id::TEST_COMMAND, cmd_id::WITHOUT_RES);
+    make_tx_data_fill_zero();
+
+  } else if(joint.torque_on == 1 && joint.motor_enabled == 0) { // torque_onが来て、モータがenableじゃないのでtorque_on
+    debugPrint(DEBUG_INFO, "Processing joint ID: 0x%X - Case B (Torque On, Motor Disabled)", joint.joint_id);
+    make_tx_header(joint.joint_id, cmd_id::TORQUE_ON);
+    make_tx_data_fill_zero();
+
+  } else if(joint.torque_on == 0 && joint.motor_enabled == 1) { // torque_onが消えて、モータがenableなのでtorque_off
+    debugPrint(DEBUG_INFO, "Processing joint ID: 0x%X - Case D (Torque Off, Motor Enabled)", joint.joint_id);
+    make_tx_header(joint.joint_id, cmd_id::TORQUE_OFF);
+    make_tx_data_fill_zero();
+
+  } else if(joint.torque_on == 1 && joint.motor_enabled == 1) { // モータがenableなのでmove_angleかSetTargetCurrentを実行
+    debugPrint(DEBUG_INFO, "Processing joint ID: 0x%X - Case C (Torque On, Motor Enabled)", joint.joint_id);
+    if(joint.control_mode == 0) {
+      debugPrint(DEBUG_INFO, "Joint ID: 0x%X - Control Mode: Move Angle", joint.joint_id);
+      make_tx_header(joint.joint_id, cmd_id::MOVE_ANGLE);
+      make_tx_data_move_angle(joint.target_angle, joint.move_time, joint.current_limit);
+    } else if(joint.control_mode == 1) {
+      debugPrint(DEBUG_INFO, "Joint ID: 0x%X - Control Mode: Set Target Current", joint.joint_id);
+      make_tx_header(joint.joint_id, cmd_id::SET_TARGET_CURRENT);
+      make_tx_data_set_target_current(joint.target_iq, joint.target_id);
+    }
   }
+}
+void clear_tx_msg(twai_message_t &tx_msg) {
+  tx_msg.identifier       = 0;
+  tx_msg.extd             = 0;
+  tx_msg.rtr              = 0;
+  tx_msg.data_length_code = 0;
+  for(int i = 0; i < 8; ++i) {
+    tx_msg.data[i] = 0;
+  }
+}
+
+void print_tx_msg(const twai_message_t &msg) {
+  Serial.println("---- TX Message ----");
+  Serial.print("Identifier: 0x");
+  Serial.println(msg.identifier, HEX);
+  Serial.print("Extended ID: ");
+  Serial.println(msg.extd ? "Yes" : "No");
+  Serial.print("DLC (Data Length Code): ");
+  Serial.println(msg.data_length_code);
+  Serial.print("Data: ");
+  for(uint8_t i = 0; i < msg.data_length_code; ++i) {
+    Serial.print("0x");
+    Serial.print(msg.data[i], HEX);
+    Serial.print(" ");
+  }
+  Serial.println();
+  Serial.println("---------------------");
+}
+
+const joint_cmd *find_joint_cmd_by_id(const std::vector<joint_cmd> &joint_list, uint8_t joint_id) {
+  for(const auto &joint : joint_list) {
+    if(joint.joint_id == joint_id) {
+      return &joint; // 一致する joint_cmd のアドレス
+    }
+  }
+  return nullptr; // 見つからない場合は nullptr
+}
+void handleCanAlerts() {
+  uint32_t alerts;
+  if(twai_read_alerts(&alerts, pdMS_TO_TICKS(10)) == ESP_OK) {
+    if(alerts & TWAI_ALERT_TX_IDLE) {
+      debugPrint(DEBUG_WARN, "CAN Alert: TX Idle - No messages to transmit.");
+    }
+    if(alerts & TWAI_ALERT_TX_SUCCESS) {
+      debugPrint(DEBUG_WARN, "CAN Alert: TX Success - Previous transmission successful.");
+    }
+    if(alerts & TWAI_ALERT_RX_DATA) {
+      debugPrint(DEBUG_WARN, "CAN Alert: RX Data - A frame has been received.");
+    }
+    if(alerts & TWAI_ALERT_ABOVE_ERR_WARN) {
+      debugPrint(DEBUG_WARN, "CAN Alert: Error Warning - Error counter exceeded warning limit.");
+    }
+    if(alerts & TWAI_ALERT_BUS_ERROR) {
+      debugPrint(DEBUG_WARN, "CAN Alert: Bus Error - Bus-level error occurred.");
+    }
+    if(alerts & TWAI_ALERT_TX_FAILED) {
+      debugPrint(DEBUG_WARN, "CAN Alert: TX Failed - Previous transmission failed.");
+    }
+    if(alerts & TWAI_ALERT_BUS_OFF) {
+      debugPrint(DEBUG_WARN, "CAN Alert: Bus Off - TWAI controller entered bus-off state.");
+    }
+    if(alerts & TWAI_ALERT_RX_QUEUE_FULL) {
+      debugPrint(DEBUG_WARN, "CAN Alert: RX Queue Full - RX queue overflow.");
+    }
+    if(alerts & TWAI_ALERT_RX_FIFO_OVERRUN) {
+      debugPrint(DEBUG_WARN, "CAN Alert: RX FIFO Overrun - RX FIFO overflow.");
+    }
+  } else {
+    debugPrint(DEBUG_INFO, "No CAN alerts received.");
+  }
+}
+void can_task_main() {
+  setDebugLevel(CAN_DEBUG_LEVEL_SETTING);
+  for(size_t i = 0; i < 12; ++i) {
+    joint_cmd &joint = joint_cmd_list[i];
+    make_tx_msg(joint);
+    // 送信
+    if(twai_transmit(&tx_msg, pdMS_TO_TICKS(1)) == ESP_OK) {
+      debugPrint(DEBUG_INFO, "CAN message sent. ID: 0x%X", joint.joint_id);
+    } else {
+      debugPrint(DEBUG_ERROR, "Failed to send CAN message. ID: 0x%X", joint.joint_id);
+      uint32_t base_id = (tx_msg.identifier >> 18) & 0x7FF;
+      // handleTransmitError(base_id, tx_msg);
+      debugPrint(DEBUG_INFO, "Clearing TX queue...");
+      if(twai_clear_transmit_queue() != ESP_OK) {
+        debugPrint(DEBUG_ERROR, "Failed to clear TX queue.");
+        return;
+      }
+      debugPrint(DEBUG_INFO, "Processing joint ID: 0x%X", joint.joint_id);
+    }
+    // 受信
+    twai_message_t rx_message;
+    if(twai_receive(&rx_msg, pdMS_TO_TICKS(1)) == ESP_OK) {
+      // handleCanAlerts(); // アラート内容を出力。これを入れないとRX error counter が125位で死にそうになる
+      delayMicroseconds(1000); // 代替おまじない。ちょっと成功確率ｱﾔﾚｲ。MDのリセット→ESPのリセットを順守すること。
+      processResSummary(rx_msg);
+    } else {
+      debugPrint(DEBUG_ERROR, "Failed to recieve CAN message. ID: 0x%X", joint.joint_id);
+    }
+  }
+  return;
 }
